@@ -3,6 +3,7 @@ import docker
 import psycopg2
 import os
 import datetime
+import nmap
 from celery import Celery
 from celery.task import periodic_task
 
@@ -24,17 +25,21 @@ conn = psycopg2.connect(
     password=os.environ.get('DB_PASSWORD', 'password')
 )
 
-#TODO: add security
-#TODO: add exceptions
+# TODO: add security
+# TODO: add exceptions
+
+
 @periodic_task(run_every=datetime.timedelta(minutes=5))
 def ping_host(host, end_date):
     # Start a new Docker container to perform the uptime monitoring
     client = docker.from_env()
-    response = client.containers.run('alpine', ['ping', '-c', '1', host], auto_remove=True)
+    response = client.containers.run(
+        'alpine', ['ping', '-c', '1', host], auto_remove=True)
 
     # Log the response code to the database
     with conn.cursor() as cursor:
-        cursor.execute(f'INSERT INTO uptime_log (host, response_code) VALUES ({host}, {response.returncode})')
+        cursor.execute(
+            f'INSERT INTO uptime_log (host, response_code) VALUES ({host}, {response.returncode})')
         conn.commit()
 
     if datetime.datetime.now() >= end_date:
@@ -42,20 +47,25 @@ def ping_host(host, end_date):
         ping_host.ignore()
 
 
-#TODO: fix this as the ping host task
+# TODO: fix this as the ping host task
 @periodic_task(run_every=datetime.timedelta(minutes=1440))
 def run_nmap_scan(host, end_date):
-    scanner = nmap.PortScanner()
 
-    while datetime.datetime.now() < end_date:
-        scanner.scan(hosts=host, arguments='-sV')
-        response = scanner.all_hosts()
+    client = docker.from_env()
+    init_port=30
+    for i in range(init_port, 4502):
+        response = client.containers.run('alpine', ['nmap', '-v --host-timeout=28800s -Pn -T4 -sT --webxml --max-retries=1 --open -p0-65355', host], auto_remove=True)
+        is_open = response['scan'][host]['tcp'][i]['state']
+        if is_open:
+            # Log the number of the open port to DB
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    f'INSERT INTO uptime_log (host, response_code) VALUES ({host}, {i})')
+                conn.commit()
 
         if datetime.datetime.now() >= end_date:
             # Stop the task when the target date is reached
-            ping_host.ignore()
-
-
+            run_nmap_scan.ignore()
 
 @app.route('/ping/<host>', methods=['GET'])
 def ping(host):
@@ -65,14 +75,12 @@ def ping(host):
     return 'UPtime monitoring started'
 
 
-#TODO: fix as ping
+# TODO: fix as ping
 @app.route('/nmap_scan', methods=['GET'])
 def nmap_scan():
     host = request.args.get('host')
     end_date = request.args.get('end_date')
-    # convert end_date to datetime object
     end_date = datetime.datetime.strptime(end_date, '%Y-%m-%d')
-    # start the Celery task
     run_nmap_scan.apply_async(args=[host, end_date])
     return 'Nmap scan task started'
 
